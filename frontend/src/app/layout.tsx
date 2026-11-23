@@ -4,6 +4,7 @@ import './globals.css';
 import { Toaster } from '@/components/ui/sonner';
 import { ThemeProvider } from 'next-themes';
 import { NetworkMismatchBanner } from '@/components/NetworkMismatchBanner';
+import { CommandPalette } from '@/components/CommandPalette';
 
 const geistSans = Geist({
   variable: '--font-geist-sans',
@@ -100,6 +101,7 @@ export default function RootLayout({
           <NetworkMismatchBanner />
           {children}
           <Toaster />
+          <CommandPalette />
         </ThemeProvider>
       </body>
     </html>

@@ -1,11 +1,12 @@
 'use client';
 
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import NotificationBell from '@/components/NotificationBell';
 import LanguageSelector from '@/components/LanguageSelector';
 import { useI18n } from '@/lib/i18n';
 import { useSep10Session } from '@/hooks/useSep10Session';
+import { OPEN_COMMAND_PALETTE_EVENT, isMacPlatform } from '@/hooks/useKeyboardShortcuts';
 
 interface HeaderProps {
   showDashboardLink?: boolean;
@@ -14,6 +15,8 @@ interface HeaderProps {
 export function Header({ showDashboardLink = true }: HeaderProps) {
   const { t } = useI18n();
   useSep10Session();
+  const [shortcutLabel, setShortcutLabel] = useState('Ctrl K');
+  useEffect(() => setShortcutLabel(isMacPlatform() ? '⌘K' : 'Ctrl K'), []);
 
   return (
     <header className="w-full border-b border-[#27272a]/60 bg-[#09090b]/80 backdrop-blur-xl sticky top-0 z-50 px-6 py-4 transition-all">
@@ -55,6 +58,16 @@ export function Header({ showDashboardLink = true }: HeaderProps) {
         </nav>
 
         <div className="flex items-center space-x-3">
+          <button
+            type="button"
+            onClick={() => window.dispatchEvent(new Event(OPEN_COMMAND_PALETTE_EVENT))}
+            className="hidden sm:inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-[#18181b] hover:bg-[#27272a] border border-[#27272a] text-[#a1a1aa] hover:text-white text-xs transition-all focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+            aria-label="Open command palette"
+            title="Command palette"
+          >
+            <span>Search</span>
+            <kbd className="text-[10px] border border-[#3f3f46] rounded px-1.5 py-0.5">{shortcutLabel}</kbd>
+          </button>
           <LanguageSelector />
           <NotificationBell />
           {showDashboardLink && (
