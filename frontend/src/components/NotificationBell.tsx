@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useNotifications } from '@/hooks/useNotifications';
 import { useWalletStore } from '@/store/walletStore';
 import { NotificationCenter } from '@/components/NotificationCenter';
@@ -11,6 +11,17 @@ export default function NotificationBell() {
   const { unreadCount } = useNotifications();
   const [isOpen, setIsOpen] = useState(false);
   const [scheduleOpen, setScheduleOpen] = useState(false);
+
+  // Re-key the badge on every increment so the pop-in animation replays (#197).
+  const previousCount = useRef(unreadCount);
+  const [popKey, setPopKey] = useState(0);
+
+  useEffect(() => {
+    if (unreadCount > previousCount.current) {
+      setPopKey((key) => key + 1);
+    }
+    previousCount.current = unreadCount;
+  }, [unreadCount]);
 
   if (!address) {
     return null;
@@ -42,7 +53,11 @@ export default function NotificationBell() {
 
         {/* Unread Counter Badge */}
         {unreadCount > 0 && (
-          <span className="absolute -top-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-blue-600 text-[10px] font-bold text-white shadow-md animate-pulse">
+          <span
+            key={popKey}
+            data-testid="notification-badge"
+            className="absolute -top-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-blue-600 text-[10px] font-bold text-white shadow-md animate-badge-pop"
+          >
             {unreadCount > 99 ? '99+' : unreadCount}
           </span>
         )}
