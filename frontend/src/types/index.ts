@@ -187,3 +187,36 @@ export interface StarredFreelancer {
   /** Project the freelancer applied to or worked on, for context. */
   lastProjectTitle?: string;
 }
+
+/** Assets with a Blend lending pool backing escrow yield (#118). */
+export type BlendPoolAsset = 'USDC' | 'XLM';
+
+/** Live lending rate and utilization for one Blend pool. */
+export interface BlendPoolRate {
+  asset: BlendPoolAsset;
+  /** Annual percentage yield as a decimal, e.g. 0.048 for 4.8%. */
+  apy: number;
+  /** Share of supplied liquidity currently borrowed, 0 to 1. */
+  utilization: number;
+  updatedAt: string;
+  /** `fallback` means the oracle was unreachable and defaults are shown. */
+  source: 'live' | 'fallback';
+}
+
+export interface BlendYieldPoint {
+  day: number;
+  /** Principal plus compounded interest. */
+  balance: number;
+  accrued: number;
+}
+
+export interface BlendYieldSummary {
+  principal: number;
+  days: number;
+  accrued: number;
+  balance: number;
+  /** Interest paid to the client under the yield split. */
+  clientShare: number;
+  /** Interest retained by the platform under the yield split. */
+  platformShare: number;
+}

@@ -31,6 +31,8 @@ import { CalendarExportButton } from '@/components/CalendarExportButton';
 import { DownloadReceiptButton } from '@/components/DownloadReceiptButton';
 import { AccountsPayableExportModal } from '@/components/AccountsPayableExportModal';
 import { GasFeeEstimatorWidget } from '@/components/GasFeeEstimatorWidget';
+import { BlendYieldVisualizer } from '@/components/BlendYieldVisualizer';
+import { BLEND_ALLOCATION_RATIO } from '@/lib/blend-yield';
 import {
   createProjectOnChain,
   lockEscrowOnChain,
@@ -112,6 +114,11 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
   
   // Today's date string for restricting date pickers to current or future dates
   const todayStr = new Date().toISOString().split('T')[0];
+
+  // Active escrows whose principal is deposited into Blend
+  const blendYieldProjects = projects.filter(
+    (p) => p.yield_enabled && p.status !== 'completed' && p.status !== 'draft' && p.budget > 0
+  );
 
   const calculateEstimatedYield = () => {
     if (!formYieldEnabled || !formBudget || Number(formBudget) <= 0) return '0.00';
@@ -200,6 +207,8 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
               files: p.files || [],
               attachments: p.attachments || [],
               created_at: p.created_at,
+              yield_enabled: Boolean(p.yield_enabled),
+              estimated_yield: Number(p.estimated_yield) || 0,
             };
           });
 
@@ -775,6 +784,18 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
             <GasFeeEstimatorWidget onFeeSelected={(feeStroops) => setSorobanBaseFee(feeStroops)} />
             <TokenPriceAlertWidget />
           </div>
+        )}
+
+        {/* Blend yield tracker for escrows routed into lending pools (#118) */}
+        {activeTab === 'projects' && blendYieldProjects.length > 0 && (
+          <BlendYieldVisualizer
+            principal={blendYieldProjects.reduce((sum, p) => sum + p.budget * BLEND_ALLOCATION_RATIO, 0)}
+            token={blendYieldProjects[0].token}
+            lockedAt={blendYieldProjects
+              .map((p) => p.created_at)
+              .filter((d): d is string => Boolean(d))
+              .sort()[0]}
+          />
         )}
 
         {/* VIEW 1: MY PROJECTS */}
