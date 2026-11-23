@@ -39,7 +39,7 @@ export function isBalanceSufficient(balance: number | null, budget: number): boo
   return getBalanceShortfall(balance, budget) === 0;
 }
 
-function readTokenBalance(account: HorizonAccountResponse, token: string): number {
+export function readTokenBalance(account: HorizonAccountResponse, token: string): number {
   const tokenConfig = SUPPORTED_TOKENS[token];
   const lines = account.balances || [];
   const match = lines.find((line) => {
@@ -114,6 +114,51 @@ export function useTokenBalance(address: string | null | undefined, token: strin
   return { balance, loading, error, refresh };
 }
 
+/**
+ * Loads the connected wallet's balance for every supported token in a single Horizon request so the
+ * token selector can show each asset's available balance side by side.
+ */
+export function useTokenBalances(address: string | null | undefined) {
+  const [balances, setBalances] = useState<Record<string, number | null>>({});
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!address) {
+      setBalances({});
+      return;
+    }
+    let active = true;
+    const controller = new AbortController();
+    setLoading(true);
+    fetch(`${HORIZON_URL}/accounts/${encodeURIComponent(address)}`, { signal: controller.signal })
+      .then(async (response) => {
+        if (response.status === 404) return {} as HorizonAccountResponse;
+        if (!response.ok) throw new Error(`Balance lookup failed (${response.status})`);
+        return (await response.json()) as HorizonAccountResponse;
+      })
+      .then((account) => {
+        if (!active) return;
+        const next: Record<string, number | null> = {};
+        Object.keys(SUPPORTED_TOKENS).forEach((symbol) => {
+          next[symbol] = readTokenBalance(account, symbol);
+        });
+        setBalances(next);
+      })
+      .catch(() => {
+        if (active && !controller.signal.aborted) setBalances({});
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [address]);
+
+  return { balances, loading };
+}
+
 const defaultInitialData: ProjectFormData = {
   title: '',
   description: '',
@@ -156,6 +201,7 @@ export function useCreateProjectForm() {
   });
 
   const walletBalance = useTokenBalance(address, formData.token);
+  const allTokenBalances = useTokenBalances(address);
   const refreshBalance = walletBalance.refresh;
   const balanceShortfall = getBalanceShortfall(walletBalance.balance, formData.budget);
   const hasSufficientBalance = isBalanceSufficient(walletBalance.balance, formData.budget);
@@ -409,6 +455,8 @@ export function useCreateProjectForm() {
     walletBalance: walletBalance.balance,
     balanceLoading: walletBalance.loading,
     balanceError: walletBalance.error,
+    tokenBalances: allTokenBalances.balances,
+    tokenBalancesLoading: allTokenBalances.loading,
     balanceShortfall,
     hasSufficientBalance,
     refreshBalance: walletBalance.refresh,

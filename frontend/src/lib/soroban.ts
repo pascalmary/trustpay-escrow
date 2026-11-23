@@ -10,6 +10,7 @@ import {
   Operation,
   Asset,
   Horizon,
+  StrKey,
 } from '@stellar/stellar-sdk';
 import { signTransaction, isConnected } from '@stellar/freighter-api';
 import { SUPPORTED_TOKENS } from '@/config/tokens';
@@ -1033,4 +1034,158 @@ export async function swapViaPathPayment(options: {
     }
     throw new Error(`Swap failed: ${codes?.join(', ') || err?.message || err}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-signature (enterprise treasury) support
+// ---------------------------------------------------------------------------
+
+export interface StellarSigner {
+  /** Signer public key (G...) or other signer key type (hash / pre-auth). */
+  key: string;
+  weight: number;
+  type: string;
+}
+
+export interface AccountThresholds {
+  low: number;
+  med: number;
+  high: number;
+}
+
+export interface MultisigAccountInfo {
+  address: string;
+  signers: StellarSigner[];
+  thresholds: AccountThresholds;
+}
+
+/** Soroban contract invocations (milestone release) are medium-threshold operations. */
+export type ThresholdCategory = keyof AccountThresholds;
+
+/**
+ * Loads the signer set and low/medium/high thresholds of a Stellar account from Horizon.
+ */
+export async function fetchMultisigAccountInfo(accountAddress: string): Promise<MultisigAccountInfo> {
+  const res = await fetch(`${HORIZON_URL}/accounts/${encodeURIComponent(accountAddress)}`);
+  if (res.status === 404) {
+    throw new Error('Account was not found on the Stellar network. Fund it before using multi-sig.');
+  }
+  if (!res.ok) {
+    throw new Error(`Could not load account signers (${res.status})`);
+  }
+  const data = await res.json();
+  return {
+    address: accountAddress,
+    signers: ((data.signers || []) as Array<{ key: string; weight: number; type: string }>)
+      .filter((s) => Number(s.weight) > 0)
+      .map((s) => ({ key: s.key, weight: Number(s.weight), type: s.type })),
+    thresholds: {
+      low: Number(data.thresholds?.low_threshold ?? 0),
+      med: Number(data.thresholds?.med_threshold ?? 0),
+      high: Number(data.thresholds?.high_threshold ?? 0),
+    },
+  };
+}
+
+/** True when a single signature is not enough to authorize a medium-threshold operation. */
+export function isMultisigAccount(info: MultisigAccountInfo | null | undefined): boolean {
+  if (!info) return false;
+  const maxSingle = info.signers.reduce((max, s) => Math.max(max, s.weight), 0);
+  return info.signers.length > 1 && maxSingle < Math.max(info.thresholds.med, 1);
+}
+
+export function getRequiredThreshold(
+  thresholds: AccountThresholds,
+  category: ThresholdCategory = 'med'
+): number {
+  return thresholds[category];
+}
+
+export function calculateCollectedWeight(signers: StellarSigner[], signedKeys: string[]): number {
+  const signed = new Set(signedKeys);
+  return signers.reduce((sum, s) => (signed.has(s.key) ? sum + s.weight : sum), 0);
+}
+
+/**
+ * Resolves which of the account's signers already signed a transaction envelope by matching the
+ * 4-byte signature hints against each signer's public key.
+ */
+export function getSignedKeysFromXdr(txXdr: string, signers: StellarSigner[]): string[] {
+  if (!txXdr) return [];
+  try {
+    const tx: any = TransactionBuilder.fromXDR(txXdr, STELLAR_NETWORK_PASSPHRASE);
+    const hints = new Set<string>(
+      (tx.signatures || []).map((sig: any) => Buffer.from(sig.hint()).toString('hex'))
+    );
+    return signers
+      .filter((s) => {
+        if (!s.key.startsWith('G')) return false;
+        try {
+          const raw = StrKey.decodeEd25519PublicKey(s.key);
+          return hints.has(Buffer.from(raw.subarray(raw.length - 4)).toString('hex'));
+        } catch {
+          return false;
+        }
+      })
+      .map((s) => s.key);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Adds the connected signer's signature to a pending transaction envelope via Freighter and
+ * returns the updated XDR so it can be passed on to the next co-signer.
+ */
+export async function cosignTransactionXdr(txXdr: string, signerAddress: string): Promise<string> {
+  if (!(await isConnected())) {
+    throw new Error('Freighter wallet extension is not detected. Please install and unlock Freighter.');
+  }
+  let signResult: any;
+  try {
+    signResult = await signTransaction(txXdr, {
+      networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
+      address: signerAddress,
+    });
+  } catch (err: any) {
+    throw new Error(`Wallet signing cancelled or rejected: ${err.message || err}`);
+  }
+  if (signResult?.error) {
+    throw new Error(
+      typeof signResult.error === 'string' ? signResult.error : signResult.error.message || 'Freighter rejected signature'
+    );
+  }
+  const signed = typeof signResult === 'string' ? signResult : signResult?.signedTxXdr || '';
+  if (!signed) throw new Error('Transaction signing was rejected or returned empty XDR.');
+  return signed;
+}
+
+/**
+ * Broadcasts a fully co-signed transaction and waits for ledger finality.
+ */
+export async function submitCoSignedTransaction(
+  txXdr: string,
+  onStatusUpdate?: TxStatusCallback
+): Promise<SorobanTxResult> {
+  const server = getSorobanRpcServer();
+  onStatusUpdate?.('submitting', 'Broadcasting co-signed transaction to Stellar network...');
+  const sendRes = await server.sendTransaction(TransactionBuilder.fromXDR(txXdr, STELLAR_NETWORK_PASSPHRASE));
+  if (sendRes.status === 'ERROR') {
+    const detail = sendRes.errorResult ? JSON.stringify(sendRes.errorResult) : sendRes.status;
+    throw new Error(`Transaction rejected by Stellar RPC: ${detail}`);
+  }
+  const txHash = sendRes.hash;
+  onStatusUpdate?.('polling', `Transaction submitted (tx: ${txHash.slice(0, 8)}...). Awaiting confirmation...`);
+  for (let attempt = 0; attempt < 35; attempt++) {
+    await new Promise((r) => setTimeout(r, 1500));
+    const status = await server.getTransaction(txHash);
+    if (status.status === 'SUCCESS') {
+      onStatusUpdate?.('success', 'Transaction successfully confirmed on Stellar!');
+      return { success: true, txHash, returnValue: null };
+    }
+    if (status.status === 'FAILED') {
+      throw new Error(`Soroban transaction failed during ledger execution (tx: ${txHash})`);
+    }
+  }
+  throw new Error(`Transaction timed out while awaiting ledger inclusion (tx: ${txHash}).`);
 }

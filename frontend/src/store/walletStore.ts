@@ -44,6 +44,17 @@ export interface OrgWalletAccount {
   addedAt: string;
 }
 
+/** A transaction awaiting additional co-signatures from a multi-sig Stellar account. */
+export interface PendingMultisigRequest {
+  id: string;
+  /** The multi-sig (treasury) account the transaction is sourced from. */
+  accountAddress: string;
+  description: string;
+  /** Transaction envelope XDR carrying the signatures collected so far. */
+  xdr: string;
+  createdAt: string;
+}
+
 export interface WalletState {
   address: string | null;
   walletName: string | null;
@@ -57,6 +68,7 @@ export interface WalletState {
   orgAccounts: OrgWalletAccount[];
   activeOrgAccountId: string | null;
   roleFilterStates: Record<ActiveRole, RoleFilterState>;
+  pendingMultisig: PendingMultisigRequest[];
   setActiveRole: (role: ActiveRole) => void;
   /** Replaces the in-memory SEP-0010 JWT (e.g. after a silent refresh). */
   setToken: (token: string | null) => void;
@@ -72,6 +84,9 @@ export interface WalletState {
   addOrgAccount: (account: { label: string; address: string; walletName?: string }) => void;
   removeOrgAccount: (id: string) => void;
   setActiveOrgAccount: (id: string | null) => void;
+  addPendingMultisig: (request: Omit<PendingMultisigRequest, 'id' | 'createdAt'>) => string;
+  updatePendingMultisig: (id: string, xdr: string) => void;
+  removePendingMultisig: (id: string) => void;
   disconnect: () => void;
 }
 
@@ -98,6 +113,7 @@ export const useWalletStore = create<WalletState>()(
         freelancer: { status: 'all', search: '', category: 'All' },
         arbiter: { status: 'disputed', search: '', category: 'All' },
       },
+      pendingMultisig: [],
       setActiveRole: (activeRole) => set({ activeRole }),
       setToken: (token) => set({ token }),
       setRoleFilter: (role, filters) =>
@@ -116,6 +132,22 @@ export const useWalletStore = create<WalletState>()(
         network = null
       ) =>
         set({ address, isClient, isFreelancer, walletName, token, network }),
+      addPendingMultisig: (request) => {
+        const id = `msig-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        set((state) => ({
+          pendingMultisig: [
+            { ...request, id, createdAt: new Date().toISOString() },
+            ...state.pendingMultisig,
+          ],
+        }));
+        return id;
+      },
+      updatePendingMultisig: (id, xdr) =>
+        set((state) => ({
+          pendingMultisig: state.pendingMultisig.map((r) => (r.id === id ? { ...r, xdr } : r)),
+        })),
+      removePendingMultisig: (id) =>
+        set((state) => ({ pendingMultisig: state.pendingMultisig.filter((r) => r.id !== id) })),
       disconnect: () => {
         try {
           const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
@@ -134,6 +166,7 @@ export const useWalletStore = create<WalletState>()(
           token: null,
           orgAccounts: [],
           activeOrgAccountId: null,
+          pendingMultisig: [],
         });
       },
     }),

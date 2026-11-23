@@ -2,14 +2,14 @@
 
 import React, { useState } from 'react';
 import { useCreateProjectForm } from '@/hooks/useCreateProjectForm';
-import { SUPPORTED_TOKENS } from '@/config/tokens';
+import { TokenSelector } from '@/components/TokenSelector';
 import { BalanceWarningBadge } from '@/components/BalanceWarningBadge';
 import { useWalletStore } from '@/store/walletStore';
 import { FiatOnRampModal } from '@/components/FiatOnRampModal';
 import { PathPaymentSwapWidget } from '@/components/PathPaymentSwapWidget';
 
 export function CreateProjectWizard() {
-  const { address } = useWalletStore();
+  const { address, targetNetwork } = useWalletStore();
   const [showOnRamp, setShowOnRamp] = useState(false);
   const [showSwap, setShowSwap] = useState(false);
   const {
@@ -27,6 +27,8 @@ export function CreateProjectWizard() {
     handleFileUploadMock,
     handleSubmit,
     walletBalance,
+    tokenBalances,
+    tokenBalancesLoading,
     balanceLoading,
     balanceShortfall,
     hasSufficientBalance,
@@ -296,34 +298,17 @@ export function CreateProjectWizard() {
               <label className="block text-xs font-bold text-[#d4d4d8] uppercase tracking-wider mb-3">
                 Select Escrow Token
               </label>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                {Object.values(SUPPORTED_TOKENS).map((t) => {
-                  const isSelected = formData.token === t.symbol;
-                  return (
-                    <div
-                      key={t.symbol}
-                      onClick={() =>
-                        handleChange({
-                          target: { name: 'token', value: t.symbol },
-                        } as any)
-                      }
-                      className={`p-4 rounded-2xl border text-center cursor-pointer transition-all ${
-                        isSelected
-                          ? 'bg-blue-600/20 border-blue-500 shadow-md ring-1 ring-blue-500'
-                          : 'bg-[#18181c] border-[#27272a] hover:border-[#3f3f46]'
-                      }`}
-                    >
-                      <div className="font-extrabold text-base text-white">{t.symbol}</div>
-                      <div className="text-[11px] text-[#a1a1aa] mt-1">{t.name}</div>
-                      {isSelected && (
-                        <span className="inline-block mt-2 text-[10px] font-bold text-blue-400">
-                          ✓ Selected
-                        </span>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
+              <TokenSelector
+                value={formData.token}
+                onChange={(symbol) =>
+                  handleChange({
+                    target: { name: 'token', value: symbol },
+                  } as any)
+                }
+                balances={tokenBalances}
+                balancesLoading={tokenBalancesLoading}
+                network={targetNetwork}
+              />
             </div>
 
             {/* Blend Yield Generation Feature */}

@@ -4,7 +4,7 @@ import React, { useState, useEffect } from 'react';
 import NumberRoll from './NumberRoll';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
-import { useWalletStore, useActiveWalletAddress } from '@/store/walletStore';
+import { useWalletStore, useActiveWalletAddress, canRaiseDispute } from '@/store/walletStore';
 import { authFetch } from '@/lib/api';
 import { useEscapeKey } from '@/hooks/useEscapeKey';
 
@@ -15,7 +15,8 @@ import { FreelancerProfileModal } from './FreelancerProfileModal';
 import { ProjectChatModal } from './ProjectChatModal';
 import { ProjectCardSkeletonList } from '@/components/skeletons';
 import { SUPPORTED_TOKENS } from '@/config/tokens';
-import { useTokenBalance, getBalanceShortfall } from '@/hooks/useCreateProjectForm';
+import { useTokenBalance, useTokenBalances, getBalanceShortfall } from '@/hooks/useCreateProjectForm';
+import { TokenSelector } from '@/components/TokenSelector';
 import { usePersistentTab } from '@/hooks/usePersistentTab';
 import { BalanceWarningBadge } from '@/components/BalanceWarningBadge';
 import { LiquidityDepthOptimizer } from '@/components/LiquidityDepthOptimizer';
@@ -40,7 +41,18 @@ import {
   getStellarExplorerUrl,
   DEFAULT_ESCROW_CONTRACT_ID,
   setSorobanBaseFee,
+  fetchMultisigAccountInfo,
+  isMultisigAccount,
+  cancelUnassignedProjectOnChain,
+  raiseDisputeOnChain,
 } from '@/lib/soroban';
+import { ConfirmModal } from '@/components/ConfirmModal';
+import {
+  MultisigApprovalModal,
+  PendingSignaturesDrawer,
+} from '@/components/MultisigApprovalModal';
+import type { PendingMultisigRequest } from '@/store/walletStore';
+import { ProjectActionsDropdown } from '@/components/ProjectActionsDropdown';
 
 export interface ClientDashboardProps {
   defaultTab?: 'projects' | 'create' | 'applicants' | 'saved';
@@ -48,8 +60,15 @@ export interface ClientDashboardProps {
 
 export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProps) {
   const router = useRouter();
-  const { address } = useWalletStore();
+  const { address, pendingMultisig, targetNetwork } = useWalletStore();
   const activeWalletAddress = useActiveWalletAddress();
+  const [isMultisig, setIsMultisig] = useState(false);
+  const [showPendingDrawer, setShowPendingDrawer] = useState(false);
+  const [multisigRequest, setMultisigRequest] = useState<PendingMultisigRequest | null>(null);
+  const [showMultisigModal, setShowMultisigModal] = useState(false);
+  const accountPendingMultisig = pendingMultisig.filter(
+    (r) => r.accountAddress === activeWalletAddress
+  );
   const { starred, isStarred, toggle: toggleStarred, setNotes: setStarredNotes } =
     useStarredFreelancers(activeWalletAddress);
   const [activeTab, setActiveTab] = usePersistentTab<"projects" | "create" | "applicants" | "saved">({
@@ -109,6 +128,7 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
   const [configuredFeeStroops, setConfiguredFeeStroops] = useState<number>(100);
   const [fundingTxMessage, setFundingTxMessage] = useState('');
   const walletBalance = useTokenBalance(activeWalletAddress, formToken);
+  const tokenBalances = useTokenBalances(activeWalletAddress);
   const balanceShortfall = getBalanceShortfall(walletBalance.balance, formBudget === '' ? 0 : formBudget);
   const hasInsufficientBalance = walletBalance.balance !== null && balanceShortfall > 0;
   
@@ -151,6 +171,97 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
   // Proposal counter-offer negotiation (#150)
   const [counterOfferTarget, setCounterOfferTarget] = useState<ApplicantCardData | null>(null);
   const [counterOfferSubmitting, setCounterOfferSubmitting] = useState(false);
+
+  // Destructive project actions (cancel / dispute) confirmed through ConfirmModal
+  const [confirmAction, setConfirmAction] = useState<{
+    type: 'cancel' | 'dispute';
+    project: Project;
+  } | null>(null);
+
+  const getCancelBlockReason = (proj: Project): string | undefined => {
+    if (proj.status === 'completed') return 'Completed projects cannot be cancelled';
+    if (proj.status === 'disputed') return 'Resolve the open dispute first';
+    if (proj.freelancer_address) {
+      return 'A freelancer is assigned — use mutual cancellation instead';
+    }
+    return undefined;
+  };
+
+  const getDisputeBlockReason = (proj: Project): string | undefined => {
+    if (proj.project_id_onchain === undefined || proj.project_id_onchain === null) {
+      return 'No on-chain escrow to dispute yet';
+    }
+    if (proj.status === 'disputed') return 'A dispute is already open';
+    if (proj.status === 'completed') return 'Completed projects cannot be disputed';
+    if (!canRaiseDispute(proj, address)) return 'Only the client or freelancer can raise a dispute';
+    return undefined;
+  };
+
+  const handleConfirmProjectAction = async () => {
+    if (!confirmAction) return;
+    if (!address) {
+      toast.error('Please connect your wallet first.');
+      return;
+    }
+    const { type, project } = confirmAction;
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+    const hasOnChainEscrow =
+      project.project_id_onchain !== undefined && project.project_id_onchain !== null;
+    try {
+      if (type === 'cancel') {
+        if (hasOnChainEscrow) {
+          await cancelUnassignedProjectOnChain({
+            clientAddress: address,
+            projectIdOnChain: project.project_id_onchain as number | string | bigint,
+          });
+        }
+        const res = await authFetch(`${apiUrl}/api/projects/${project.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'cancelled' }),
+        });
+        if (res.ok) {
+          toast.success('Project cancelled' + (hasOnChainEscrow ? ' and escrow funds refunded.' : '.'));
+        } else {
+          toast.warning('Escrow cancelled on-chain, but the project record could not be updated.');
+        }
+      } else {
+        await raiseDisputeOnChain({
+          callerAddress: address,
+          projectIdOnChain: project.project_id_onchain as number | string | bigint,
+        });
+        await authFetch(`${apiUrl}/api/projects/${project.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'disputed' }),
+        });
+        toast.warning('Dispute raised! Funds are frozen until an arbiter rules.');
+      }
+      setConfirmAction(null);
+      await fetchBackendProjects();
+    } catch (err: any) {
+      toast.error(`${type === 'cancel' ? 'Cancellation' : 'Dispute'} failed: ${err?.message || err}`);
+    }
+  };
+
+  // Detect whether the connected enterprise account requires multiple signers (#multisig)
+  useEffect(() => {
+    let cancelled = false;
+    if (!activeWalletAddress) {
+      setIsMultisig(false);
+      return;
+    }
+    fetchMultisigAccountInfo(activeWalletAddress)
+      .then((info) => {
+        if (!cancelled) setIsMultisig(isMultisigAccount(info));
+      })
+      .catch(() => {
+        if (!cancelled) setIsMultisig(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeWalletAddress]);
 
   // Function to fetch real projects from backend
   const fetchBackendProjects = async (pageToFetch = currentPage) => {
@@ -828,6 +939,17 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
                 <NumberRoll value={projects.length} /> <span>{projects.length === 1 ? 'project' : 'projects'}</span>
               </h2>
               <div className="flex items-center gap-2">
+                {(isMultisig || accountPendingMultisig.length > 0) && (
+                  <button
+                    type="button"
+                    data-testid="pending-signatures-button"
+                    onClick={() => setShowPendingDrawer(true)}
+                    className="inline-flex items-center space-x-1.5 px-3.5 py-2 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 font-medium text-xs rounded-xl border border-amber-500/30 transition-all"
+                    title="Transactions waiting for co-signers on your multi-sig account"
+                  >
+                    <span>✍️ Pending Signatures ({accountPendingMultisig.length})</span>
+                  </button>
+                )}
                 <button
                   onClick={() => setShowApExportModal(true)}
                   className="inline-flex items-center space-x-1.5 px-3.5 py-2 bg-[#232326] hover:bg-[#2d2d33] text-[#e4e4e7] font-medium text-xs rounded-xl border border-[#333338] transition-all"
@@ -931,6 +1053,14 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
                     </div>
 
                     <div className="self-start sm:self-center flex flex-col items-end gap-1.5">
+                      <ProjectActionsDropdown
+                        project={proj}
+                        onView={() => router.push(`/projects/${proj.id}`)}
+                        onDispute={() => setConfirmAction({ type: 'dispute', project: proj })}
+                        onCancel={() => setConfirmAction({ type: 'cancel', project: proj })}
+                        disputeDisabledReason={getDisputeBlockReason(proj)}
+                        cancelDisabledReason={getCancelBlockReason(proj)}
+                      />
                       <div className="flex items-center gap-1.5">
                         <button
                           type="button"
@@ -1145,28 +1275,16 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
               </div>
 
               {/* Grid: Escrow Currency, Total Budget & Overall Deadline */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <div className="space-y-1.5">
-                  <label className="block text-xs sm:text-sm font-semibold text-[#e4e4e7]">
-                    Escrow Currency
-                  </label>
-                  <div className="relative">
-                    <select
-                      value={formToken}
-                      onChange={(e) => setFormToken(e.target.value as any)}
-                      className="w-full appearance-none px-4 py-3 bg-[#232326] border border-[#333338] rounded-xl text-white text-sm focus:outline-none focus:border-blue-500 transition-colors cursor-pointer"
-                    >
-                      <option value="USDC">USDC (USD Coin)</option>
-                      <option value="EURC">EURC (Euro Coin)</option>
-                      <option value="XLM">XLM (Stellar Lumens)</option>
-                      <option value="PYUSD">PYUSD (PayPal USD)</option>
-                    </select>
-                    <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-4 text-[#a1a1aa]">
-                      <svg className="w-4 h-4 fill-current" viewBox="0 0 20 20">
-                        <path d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" />
-                      </svg>
-                    </div>
-                  </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-1.5 sm:col-span-2">
+                  <TokenSelector
+                    label="Escrow Currency"
+                    value={formToken}
+                    onChange={setFormToken}
+                    balances={tokenBalances.balances}
+                    balancesLoading={tokenBalances.loading}
+                    network={targetNetwork}
+                  />
                 </div>
 
                 <div className="space-y-1.5">
@@ -1975,6 +2093,54 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
         isSubmitting={counterOfferSubmitting}
         onClose={() => setCounterOfferTarget(null)}
         onSubmit={handleSubmitCounterOffer}
+      />
+
+      {/* Destructive action confirmation (cancel escrow / raise dispute) */}
+      <ConfirmModal
+        isOpen={confirmAction !== null}
+        onClose={() => setConfirmAction(null)}
+        onConfirm={handleConfirmProjectAction}
+        level="danger"
+        title={confirmAction?.type === 'cancel' ? 'Cancel this project?' : 'Raise a dispute?'}
+        impactSummary={
+          confirmAction?.type === 'cancel'
+            ? 'This permanently cancels the project and cannot be undone.'
+            : 'This freezes all escrowed funds until an arbiter issues a ruling.'
+        }
+        description={
+          confirmAction?.type === 'cancel'
+            ? `“${confirmAction.project.title}” will be closed and any deposited escrow funds are refunded to your wallet.`
+            : `Disputing “${confirmAction?.project.title ?? ''}” locks the on-chain escrow. Only raise a dispute after trying to resolve the issue with the other party.`
+        }
+        confirmText={confirmAction?.type === 'cancel' ? 'CANCEL' : 'DISPUTE'}
+        confirmLabel={confirmAction?.type === 'cancel' ? 'Cancel project' : 'Raise dispute'}
+        cancelLabel="Keep project"
+      />
+
+      {/* Multi-sig co-signing (enterprise treasury accounts) */}
+      <PendingSignaturesDrawer
+        isOpen={showPendingDrawer}
+        onClose={() => setShowPendingDrawer(false)}
+        requests={accountPendingMultisig}
+        onSelect={(req) => {
+          setMultisigRequest(req);
+          setShowPendingDrawer(false);
+          setShowMultisigModal(true);
+        }}
+      />
+      <MultisigApprovalModal
+        isOpen={showMultisigModal}
+        onClose={() => setShowMultisigModal(false)}
+        accountAddress={activeWalletAddress}
+        request={
+          multisigRequest
+            ? pendingMultisig.find((r) => r.id === multisigRequest.id) || multisigRequest
+            : null
+        }
+        onSubmitted={() => {
+          setMultisigRequest(null);
+          void fetchBackendProjects();
+        }}
       />
 
       {/* Enterprise Accounts Payable Export Modal */}
